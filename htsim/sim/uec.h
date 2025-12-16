@@ -469,6 +469,30 @@ private:
     EventList::Handle _probe_timer_handle; 
     /******** END Probe parameters *********/
 
+    /******** REDR EV Buffer parameters *********/
+    struct EVBufferEntry {
+        uint16_t cachedEV;
+        bool isValid;
+        bool isFrozen;
+        simtime_picosec unfreeze;
+        bool clonePacket;
+        
+        EVBufferEntry() : cachedEV(0), isValid(false), isFrozen(false), 
+                          unfreeze(0), clonePacket(false) {}
+    };
+    
+    static const uint16_t REPS_BUFFER_SIZE = 64;  // Size of EV buffer
+    static const uint16_t EVS_SIZE = 256;          // Number of entropy values
+    static const simtime_picosec TIMEOUT = timeFromUs(100);  // Timeout for frozen entries
+    
+    vector<EVBufferEntry> _EVbuffer;
+    uint16_t _ev_head;
+    uint16_t _validEVs;
+    uint16_t _exploreCounter;  // Counter for exploration mode
+    
+    // Helper function for REDR
+    EVBufferEntry* getNextEV();
+    /******** END REDR EV Buffer parameters *********/
 
     // Connectivity
     PacketFlow _flow;
@@ -535,7 +559,7 @@ class UecSink : public DataReceiver {
     UecBasePacket::seq_t sackBitmapBase(UecBasePacket::seq_t epsn);
     UecBasePacket::seq_t sackBitmapBaseIdeal();
     uint64_t buildSackBitmap(UecBasePacket::seq_t ref_epsn);
-    UecAckPacket* sack(uint16_t path_id, UecBasePacket::seq_t seqno, UecBasePacket::seq_t acked_psn, bool ce, bool rtx_echo);
+    UecAckPacket* sack(uint16_t path_id, UecBasePacket::seq_t seqno, UecBasePacket::seq_t acked_psn, bool ce, bool rtx_echo, bool deflected = false);
 
     UecNackPacket* nack(uint16_t path_id, UecBasePacket::seq_t seqno, bool last_hop, bool ecn_echo);
 
