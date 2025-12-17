@@ -376,6 +376,11 @@ public:
     //debug
     static flowid_t _debug_flowid;
 
+    // REDR EV Buffer parameters (public constants)
+    static const uint16_t REPS_BUFFER_SIZE;  // Size of EV buffer
+    static const uint16_t EVS_SIZE;          // Number of entropy values
+    static const simtime_picosec TIMEOUT;    // Timeout for frozen entries
+
     // ATLAHS
     AtlahsHtsimApi *_atlahs_api = nullptr;
     graph_node_properties *lgs_node; // used for logging purposes

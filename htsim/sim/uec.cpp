@@ -83,6 +83,12 @@ float UecSrc::loss_retx_factor = 1.5;
 int UecSrc::min_retx_config = 5;
 /* End SLEEK parameters */
 
+/* REDR EV Buffer parameters */
+const uint16_t UecSrc::REPS_BUFFER_SIZE = 64;  // Size of EV buffer
+const uint16_t UecSrc::EVS_SIZE = 256;          // Number of entropy values
+const simtime_picosec UecSrc::TIMEOUT = 10000000;  // Timeout for frozen entries
+/* End REDR EV Buffer parameters */
+
 void UecSrc::initNsccParams(simtime_picosec network_rtt,
                             linkspeed_bps linkspeed,
                             simtime_picosec target_Qdelay,
@@ -837,6 +843,9 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
                     << endl; */
                 cancelRTO();
                 _done_sending = true;
+                // Clear retransmission queue to prevent spurious retransmissions
+                _rtx_queue.clear();
+                _rtx_backlog = 0;
 
                 // ATLAHS 
                 EventOver *flow_over = new EventOver(from, to, _flow_size, tag, eventlist().now(), AtlahsEventType::SEND_EVENT_OVER);
@@ -1945,7 +1954,13 @@ mem_b UecSrc::getNextPacketSize(){
 }
 
 void UecSrc::sendIfPermitted() {
-    // send if the NIC, credit and window allow.           
+    // send if the NIC, credit and window allow.
+    
+    // If flow is already finished, don't try to send anything
+    // This prevents spurious retransmissions after flows complete
+    if (_done_sending) {
+        return;
+    }
 
     if (_receiver_based_cc && credit() <= 0) {
         // can send if we have *any* credit, but we don't                                                                                                         
@@ -2137,6 +2152,16 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
 
 mem_b UecSrc::sendRtxPacket(const Route& route) {
     assert(!_rtx_queue.empty());
+    
+    // If flow is already finished, don't send retransmissions
+    // This prevents spurious retransmissions after flows complete
+    if (_done_sending) {
+        // Clear the retransmission queue since flow is done
+        _rtx_queue.clear();
+        _rtx_backlog = 0;
+        return 0;
+    }
+    
     auto seq_no = _rtx_queue.begin()->first;
     mem_b full_pkt_size = _rtx_queue.begin()->second;
     spendCredit(full_pkt_size);
@@ -2242,6 +2267,12 @@ void UecSrc::createSendRecord(UecBasePacket::seq_t seqno, mem_b full_pkt_size) {
 }
 
 void UecSrc::queueForRtx(UecBasePacket::seq_t seqno, mem_b pkt_size) {
+    // If flow is already finished, don't queue retransmissions
+    // This prevents spurious retransmissions after flows complete
+    if (_done_sending) {
+        return;
+    }
+    
     assert(_rtx_queue.find(seqno) == _rtx_queue.end());
     _rtx_queue.emplace(seqno, pkt_size);
     _rtx_backlog += pkt_size;
@@ -2341,6 +2372,12 @@ void UecSrc::recalculateRTO() {
 void UecSrc::rtxTimerExpired() {
     assert(eventlist().now() == _rtx_timeout);
     clearRTO();
+
+    // If flow is already finished, don't retransmit - just return
+    // This prevents spurious retransmissions after flows complete
+    if (_done_sending) {
+        return;
+    }
 
     auto first_entry = _send_times.begin();
     assert(first_entry != _send_times.end());
@@ -2664,10 +2701,20 @@ void UecSink::processData(UecDataPacket& pkt) {
         _stats.duplicates++;
         _nic.logReceivedData(pkt.size(), 0);
 
-        // if (_src->flow()->flow_id() == UecSrc::_debug_flowid){   
-            cout << timeAsUs(_src->eventlist().now()) << " flowid " << _src->flow()->flow_id()  
-                << " Spurious " << pkt.epsn() <<endl;
-        // }
+        // Only log spurious messages if the flow is still active
+        // Suppress spurious messages after flows complete (late-arriving packets)
+        // Check both: 1) if sender is done, and 2) if receiver has received all data
+        // Also suppress if packet is way behind expected (old duplicate)
+        bool flow_finished = _src->isTotallyFinished();
+        bool receiver_done = (_received_bytes >= _src->flowsize());
+        bool old_duplicate = (pkt.epsn() < _expected_epsn - 100); // Packet is way behind expected
+        
+        if (!flow_finished && !receiver_done && !old_duplicate) {
+            // if (_src->flow()->flow_id() == UecSrc::_debug_flowid){   
+                cout << timeAsUs(_src->eventlist().now()) << " flowid " << _src->flow()->flow_id()  
+                    << " Spurious " << pkt.epsn() <<endl;
+            // }
+        }
         // sender is confused and sending us duplicates: ACK straight away.
         // this code is different from the proposed hardware implementation, as it keeps track of
         // the ACK state of OOO packets.

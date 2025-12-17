@@ -912,18 +912,23 @@ FatTreeTopology::FatTreeTopology(const FatTreeTopologyCfg* cfg,
                 }
 
                 if (_cfg->_tiers == 2 && (agg - agg_min) < _cfg->_num_failed_links){
-                    queues_nup_nlp[agg][tor][b] = alloc_queue(queueLogger, _cfg->_downlink_speeds[AGG_TIER],_cfg->_queue_down[AGG_TIER], DOWNLINK, AGG_TIER,false,true);
-                    cout << "Failure: US" + ntoa(agg) + "->LS_" + ntoa(tor) + "(" + ntoa(b) + ") linkspeed set to " << speedAsGbps(_cfg->_downlink_speeds[AGG_TIER] * _cfg->_failed_link_ratio) << endl;
+                    // Fully fail the link by setting to NULL (not valid hop, but no linkspeed degradation)
+                    queues_nup_nlp[agg][tor][b] = NULL;
+                    cout << "Failure: US" + ntoa(agg) + "->LS_" + ntoa(tor) + "(" + ntoa(b) + ") link fully failed (NULL)" << endl;
                 }
                 else
-                    queues_nup_nlp[agg][tor][b] = alloc_queue((QueueLogger*)queueLogger, (const mem_b)_cfg->_queue_down[AGG_TIER], DOWNLINK, AGG_TIER);
-
-                queues_nup_nlp[agg][tor][b]->setName("US" + ntoa(agg) + "->LS_" + ntoa(tor) + "(" + ntoa(b) + ")");
+                        queues_nup_nlp[agg][tor][b] = alloc_queue((QueueLogger*)queueLogger, (const mem_b)_cfg->_queue_down[AGG_TIER], DOWNLINK, AGG_TIER);
+                    queues_nup_nlp[agg][tor][b]->setName("US" + ntoa(agg) + "->LS_" + ntoa(tor) + "(" + ntoa(b) + ")");
                 //if (logfile) logfile->writeName(*(queues_nup_nlp[agg][tor]));
             
                 simtime_picosec hop_latency = (_cfg->_hop_latency == 0) ? _cfg->_link_latencies[AGG_TIER] : _cfg->_hop_latency;
-                pipes_nup_nlp[agg][tor][b] = new Pipe(hop_latency, *_eventlist);
-                pipes_nup_nlp[agg][tor][b]->setName("Pipe-US" + ntoa(agg) + "->LS" + ntoa(tor) + "(" + ntoa(b) + ")");
+                if (_cfg->_tiers == 2 && (agg - agg_min) < _cfg->_num_failed_links){
+                    // Fully fail the pipe as well
+                    pipes_nup_nlp[agg][tor][b] = NULL;
+                } else {
+                    pipes_nup_nlp[agg][tor][b] = new Pipe(hop_latency, *_eventlist);
+                    pipes_nup_nlp[agg][tor][b]->setName("Pipe-US" + ntoa(agg) + "->LS" + ntoa(tor) + "(" + ntoa(b) + ")");
+                }
                 //if (logfile) logfile->writeName(*(pipes_nup_nlp[agg][tor]));
             
                 // Uplink
@@ -934,37 +939,58 @@ FatTreeTopology::FatTreeTopology(const FatTreeTopologyCfg* cfg,
                 }
 
                 if (_cfg->_tiers == 2 && (agg - agg_min) < _cfg->_num_failed_links){
-                    queues_nlp_nup[tor][agg][b] = alloc_queue(queueLogger, _cfg->_downlink_speeds[AGG_TIER], _cfg->_queue_up[TOR_TIER], UPLINK, TOR_TIER, true, true);
-                    cout << "Failure: LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ") linkspeed set to " << speedAsGbps(_cfg->_downlink_speeds[AGG_TIER] * _cfg->_failed_link_ratio) << endl;
+                    // Fully fail the link by setting to NULL (not valid hop, but no linkspeed degradation)
+                    queues_nlp_nup[tor][agg][b] = NULL;
+                    cout << "Failure: LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ") link fully failed (NULL)" << endl;
                 }
-                else 
+                else {
                     queues_nlp_nup[tor][agg][b] = alloc_queue(queueLogger, _cfg->_queue_up[TOR_TIER], UPLINK, TOR_TIER, true);
-
-                queues_nlp_nup[tor][agg][b]->setName("LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
+                    queues_nlp_nup[tor][agg][b]->setName("LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
+                }
                 //cout << queues_nlp_nup[tor][agg][b]->str() << endl;
                 //if (logfile) logfile->writeName(*(queues_nlp_nup[tor][agg]));
 
-                assert(switches_lp[tor]->addPort(queues_nlp_nup[tor][agg][b]) < 128);
-                assert(switches_up[agg]->addPort(queues_nup_nlp[agg][tor][b]) < 128);
-                queues_nlp_nup[tor][agg][b]->setRemoteEndpoint(switches_up[agg]);
-                queues_nup_nlp[agg][tor][b]->setRemoteEndpoint(switches_lp[tor]);
+                // Only add ports and set remote endpoints if queues are not NULL (not failed)
+                if (queues_nlp_nup[tor][agg][b] != NULL) {
+                    assert(switches_lp[tor]->addPort(queues_nlp_nup[tor][agg][b]) < 128);
+                    queues_nlp_nup[tor][agg][b]->setRemoteEndpoint(switches_up[agg]);
+                }
+                if (queues_nup_nlp[agg][tor][b] != NULL) {
+                    assert(switches_up[agg]->addPort(queues_nup_nlp[agg][tor][b]) < 128);
+                    queues_nup_nlp[agg][tor][b]->setRemoteEndpoint(switches_lp[tor]);
+                }
 
                 /*if (_qt==LOSSLESS){
                   ((LosslessQueue*)queues_nlp_nup[tor][agg])->setRemoteEndpoint(queues_nup_nlp[agg][tor]);
                   ((LosslessQueue*)queues_nup_nlp[agg][tor])->setRemoteEndpoint(queues_nlp_nup[tor][agg]);
                   }else */
-                if (_cfg->_qt==LOSSLESS_INPUT || _cfg->_qt == LOSSLESS_INPUT_ECN){            
-                    new LosslessInputQueue(*_eventlist, queues_nlp_nup[tor][agg][b],switches_up[agg], hop_latency);
-                    new LosslessInputQueue(*_eventlist, queues_nup_nlp[agg][tor][b],switches_lp[tor], hop_latency);
+                if (_cfg->_qt==LOSSLESS_INPUT || _cfg->_qt == LOSSLESS_INPUT_ECN){
+                    // Only create LosslessInputQueue if queues are not NULL
+                    if (queues_nlp_nup[tor][agg][b] != NULL) {
+                        new LosslessInputQueue(*_eventlist, queues_nlp_nup[tor][agg][b],switches_up[agg], hop_latency);
+                    }
+                    if (queues_nup_nlp[agg][tor][b] != NULL) {
+                        new LosslessInputQueue(*_eventlist, queues_nup_nlp[agg][tor][b],switches_lp[tor], hop_latency);
+                    }
                 }
         
-                pipes_nlp_nup[tor][agg][b] = new Pipe(hop_latency, *_eventlist);
-                pipes_nlp_nup[tor][agg][b]->setName("Pipe-LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
+                if (_cfg->_tiers == 2 && (agg - agg_min) < _cfg->_num_failed_links){
+                    // Fully fail the pipe as well
+                    pipes_nlp_nup[tor][agg][b] = NULL;
+                } else {
+                    pipes_nlp_nup[tor][agg][b] = new Pipe(hop_latency, *_eventlist);
+                    pipes_nlp_nup[tor][agg][b]->setName("Pipe-LS" + ntoa(tor) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
+                }
                 //if (logfile) logfile->writeName(*(pipes_nlp_nup[tor][agg]));
         
                 if (_ff){
-                    _ff->add_queue(queues_nlp_nup[tor][agg][b]);
-                    _ff->add_queue(queues_nup_nlp[agg][tor][b]);
+                    // Only add to first fit if queues are not NULL
+                    if (queues_nlp_nup[tor][agg][b] != NULL) {
+                        _ff->add_queue(queues_nlp_nup[tor][agg][b]);
+                    }
+                    if (queues_nup_nlp[agg][tor][b] != NULL) {
+                        _ff->add_queue(queues_nup_nlp[agg][tor][b]);
+                    }
                 }
             }
         }
@@ -1011,18 +1037,21 @@ FatTreeTopology::FatTreeTopology(const FatTreeTopologyCfg* cfg,
                     }
         
                     if ((l+agg*_cfg->_agg_switches_per_pod)<_cfg->_num_failed_links){
-                        queues_nc_nup[core][agg][b] = alloc_queue(queueLogger, _cfg->_downlink_speeds[CORE_TIER], _cfg->_queue_down[CORE_TIER], DOWNLINK, CORE_TIER, false,true);
-                        cout << "Adding link failure for agg_sw " << ntoa(agg) << " l " << ntoa(l) << " b " << ntoa(b) << endl;
+                        // Fully fail the link by setting to NULL (not valid hop, but no linkspeed degradation)
+                        queues_nc_nup[core][agg][b] = NULL;
+                        cout << "Adding link failure for agg_sw " << ntoa(agg) << " l " << ntoa(l) << " b " << ntoa(b) << " (fully failed - NULL)" << endl;
                     } else {
                         queues_nc_nup[core][agg][b] = alloc_queue(queueLogger, _cfg->_queue_down[CORE_TIER], DOWNLINK, CORE_TIER);
+                        queues_nc_nup[core][agg][b]->setName("CS" + ntoa(core) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
                     }
-        
-                    queues_nc_nup[core][agg][b]->setName("CS" + ntoa(core) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
 
+                    // Only add ports and set remote endpoints if queues are not NULL (not failed)
                     assert(switches_up[agg]->addPort(queues_nup_nc[agg][core][b]) < 64);
-                    assert(switches_c[core]->addPort(queues_nc_nup[core][agg][b]) < 64);
                     queues_nup_nc[agg][core][b]->setRemoteEndpoint(switches_c[core]);
-                    queues_nc_nup[core][agg][b]->setRemoteEndpoint(switches_up[agg]);
+                    if (queues_nc_nup[core][agg][b] != NULL) {
+                        assert(switches_c[core]->addPort(queues_nc_nup[core][agg][b]) < 64);
+                        queues_nc_nup[core][agg][b]->setRemoteEndpoint(switches_up[agg]);
+                    }
 
                     /*if (_qt==LOSSLESS){
                       ((LosslessQueue*)queues_nup_nc[agg][core])->setRemoteEndpoint(queues_nc_nup[core][agg]);
@@ -1031,12 +1060,20 @@ FatTreeTopology::FatTreeTopology(const FatTreeTopologyCfg* cfg,
                       else*/
                     if (_cfg->_qt == LOSSLESS_INPUT || _cfg->_qt == LOSSLESS_INPUT_ECN){
                         new LosslessInputQueue(*_eventlist, queues_nup_nc[agg][core][b], switches_c[core], hop_latency);
-                        new LosslessInputQueue(*_eventlist, queues_nc_nup[core][agg][b], switches_up[agg], hop_latency);
+                        // Only create LosslessInputQueue if queue is not NULL
+                        if (queues_nc_nup[core][agg][b] != NULL) {
+                            new LosslessInputQueue(*_eventlist, queues_nc_nup[core][agg][b], switches_up[agg], hop_latency);
+                        }
                     }
                     //if (logfile) logfile->writeName(*(queues_nc_nup[core][agg]));
             
-                    pipes_nc_nup[core][agg][b] = new Pipe(hop_latency, *_eventlist);
-                    pipes_nc_nup[core][agg][b]->setName("Pipe-CS" + ntoa(core) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
+                    if ((l+agg*_cfg->_agg_switches_per_pod)<_cfg->_num_failed_links){
+                        // Fully fail the pipe as well
+                        pipes_nc_nup[core][agg][b] = NULL;
+                    } else {
+                        pipes_nc_nup[core][agg][b] = new Pipe(hop_latency, *_eventlist);
+                        pipes_nc_nup[core][agg][b]->setName("Pipe-CS" + ntoa(core) + "->US" + ntoa(agg) + "(" + ntoa(b) + ")");
+                    }
                     //if (logfile) logfile->writeName(*(pipes_nc_nup[core][agg]));
             
                     if (_ff){
@@ -1322,11 +1359,19 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
             assert(_cfg->MAX_POD_AGG_SWITCH(pod) == _cfg->NAGG - 1);
         }
         for (uint32_t upper = _cfg->MIN_POD_AGG_SWITCH(pod);upper <= _cfg->MAX_POD_AGG_SWITCH(pod); upper++){
-            for (uint32_t b_up = 0; b_up < _cfg->_bundlesize[AGG_TIER]; b_up++) {
+                for (uint32_t b_up = 0; b_up < _cfg->_bundlesize[AGG_TIER]; b_up++) {
                 for (uint32_t b_down = 0; b_down < _cfg->_bundlesize[AGG_TIER]; b_down++) {
                     // b_up is link number in upgoing bundle, b_down is link number in downgoing bundle
                     // note: no bundling supported between host and tor - just use link number 0
                 
+                    // Skip this path if any queue/pipe in the path is NULL (failed link)
+                    if (queues_nlp_nup[_cfg->HOST_POD_SWITCH(src)][upper][b_up] == NULL ||
+                        pipes_nlp_nup[_cfg->HOST_POD_SWITCH(src)][upper][b_up] == NULL ||
+                        queues_nup_nlp[upper][_cfg->HOST_POD_SWITCH(dest)][b_down] == NULL ||
+                        pipes_nup_nlp[upper][_cfg->HOST_POD_SWITCH(dest)][b_down] == NULL) {
+                        continue;  // Skip this path - it includes a failed link
+                    }
+                    
                     //upper is nup
       
                     routeout = new Route();
@@ -1353,7 +1398,7 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                     routeout->push_back(pipes_nlp_ns[_cfg->HOST_POD_SWITCH(dest)][dest][0]);
 
                     if (reverse) {
-                        // reverse path for RTS packets
+                        // reverse path for RTS packets - check already done above for forward path
                         routeback = new Route();
       
                         routeback->push_back(queues_ns_nlp[dest][_cfg->HOST_POD_SWITCH(dest)][0]);
@@ -1407,6 +1452,23 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                             for (uint32_t b2_down = 0; b2_down < _cfg->_bundlesize[CORE_TIER]; b2_down++) {
                                 // b2_up is link number in upgoing bundle from agg to core, b2_down is link number in downgoing bundle
                                 // note: no bundling supported between host and tor - just use link number 0
+                                
+                                //now take the only link down to the destination server!
+                                uint32_t upper2 = _cfg->MIN_POD_AGG_SWITCH(_cfg->HOST_POD(dest)) + core % _cfg->_agg_switches_per_pod;
+                                //printf("K %d HOST_POD(%d) %d core %d upper2 %d\n",K,dest,HOST_POD(dest),core, upper2);
+                                
+                                // Skip this path if any queue/pipe in the path is NULL (failed link)
+                                if (queues_nlp_nup[_cfg->HOST_POD_SWITCH(src)][upper][b1_up] == NULL ||
+                                    pipes_nlp_nup[_cfg->HOST_POD_SWITCH(src)][upper][b1_up] == NULL ||
+                                    queues_nup_nc[upper][core][b2_up] == NULL ||
+                                    pipes_nup_nc[upper][core][b2_up] == NULL ||
+                                    queues_nc_nup[core][upper2][b2_down] == NULL ||
+                                    pipes_nc_nup[core][upper2][b2_down] == NULL ||
+                                    queues_nup_nlp[upper2][_cfg->HOST_POD_SWITCH(dest)][b1_down] == NULL ||
+                                    pipes_nup_nlp[upper2][_cfg->HOST_POD_SWITCH(dest)][b1_down] == NULL) {
+                                    continue;  // Skip this path - it includes a failed link
+                                }
+                                
                                 //upper is nup
         
                                 routeout = new Route();
@@ -1430,17 +1492,12 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                                 if (_cfg->_qt==LOSSLESS_INPUT || _cfg->_qt==LOSSLESS_INPUT_ECN)
                                     routeout->push_back(queues_nup_nc[upper][core][b2_up]->getRemoteEndpoint());
         
-                                //now take the only link down to the destination server!
-        
-                                uint32_t upper2 = _cfg->MIN_POD_AGG_SWITCH(_cfg->HOST_POD(dest)) + core % _cfg->_agg_switches_per_pod;
-                                //printf("K %d HOST_POD(%d) %d core %d upper2 %d\n",K,dest,HOST_POD(dest),core, upper2);
-        
                                 routeout->push_back(queues_nc_nup[core][upper2][b2_down]);
                                 routeout->push_back(pipes_nc_nup[core][upper2][b2_down]);
 
                                 if (_cfg->_qt==LOSSLESS_INPUT || _cfg->_qt==LOSSLESS_INPUT_ECN)
                                     routeout->push_back(queues_nc_nup[core][upper2][b2_down]->getRemoteEndpoint());        
-
+        
                                 routeout->push_back(queues_nup_nlp[upper2][_cfg->HOST_POD_SWITCH(dest)][b1_down]);
                                 routeout->push_back(pipes_nup_nlp[upper2][_cfg->HOST_POD_SWITCH(dest)][b1_down]);
 

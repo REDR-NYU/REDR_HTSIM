@@ -5,7 +5,7 @@ CONNECTION_MATRIX="../../connection_matrices/cm_assignment2/one.cm"
 
 
 
-algo="ecmp"
+algo="reps"
 
 # Run experiment
 $EXECUTABLE \

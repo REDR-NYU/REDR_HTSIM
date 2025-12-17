@@ -1,8 +1,8 @@
-Nodes 32
+Nodes 128
 Connections 2
-0->8 start 0 size 2000000
-1->9 start 0 size 2000000
 Failures 1
+0->100 start 0 size 2000000
+1->101 start 0 size 2000000
 failure switch_type AGG switch_id 0 link_id 0
 
 

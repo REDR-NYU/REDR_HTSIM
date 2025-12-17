@@ -66,6 +66,7 @@ class LosslessInputQueue;
 // See tcppacket.h to illustrate how Packet is typically used.
 class Packet {
     friend class PacketFlow;
+    friend class FatTreeSwitch;  // Allow FatTreeSwitch to access _ingressqueue for REDR rerouting
  public:
     // use PRIO_NONE if the packet is never expected to encounter a priority queue, otherwise default to PRIO_LO
     typedef enum {PRIO_LO, PRIO_MID, PRIO_HI, PRIO_NONE} PktPriority;
@@ -162,7 +163,14 @@ class Packet {
     virtual void set_route(const Route *route=nullptr);
     virtual void set_route(PacketFlow& flow, const Route &route, int pkt_size, packetid_t id);
 
-    void set_ingress_queue(LosslessInputQueue* t){assert(!_ingressqueue); _ingressqueue = t;}
+    void set_ingress_queue(LosslessInputQueue* t){
+        // For rerouted packets (REDR), the ingress queue may already be set
+        // Clear it first if it's set to allow rerouting to work correctly
+        if (_ingressqueue) {
+            _ingressqueue = NULL;
+        }
+        _ingressqueue = t;
+    }
     LosslessInputQueue* get_ingress_queue(){assert(_ingressqueue); return _ingressqueue;}
     void clear_ingress_queue(){assert(_ingressqueue); _ingressqueue = NULL;}
 

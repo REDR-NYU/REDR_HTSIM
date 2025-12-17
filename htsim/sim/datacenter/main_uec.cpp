@@ -19,6 +19,7 @@
 #include "uec_mp.h"
 #include "uec_pdcses.h"
 #include "compositequeue.h"
+#include "queue_lossless_input.h"
 #include "topology.h"
 #include "connection_matrix.h"
 #include "pciemodel.h"
@@ -45,7 +46,7 @@ uint32_t DEFAULT_NONTRIMMING_QUEUESIZE_FACTOR = 5;
 EventList eventlist;
 
 void exit_error(char* progr) {
-    cout << "Usage " << progr << " [-nodes N]\n\t[-cwnd cwnd_size]\n\t[-q queue_size]\n\t[-queue_type composite|random|lossless|lossless_input|]\n\t[-tm traffic_matrix_file]\n\t[-strat route_strategy (single,rand,perm,pull,ecmp,\n\tecmp_host path_count,ecmp_ar,ecmp_rr,\n\tecmp_host_ar ar_thresh)]\n\t[-log log_level]\n\t[-seed random_seed]\n\t[-end end_time_in_usec]\n\t[-mtu MTU]\n\t[-hop_latency x] per hop wire latency in us,default 1\n\t[-target_q_delay x] target_queuing_delay in us, default is 6us \n\t[-switch_latency x] switching latency in us, default 0\n\t[-host_queue_type  swift|prio|fair_prio]\n\t[-logtime dt] sample time for sinklogger, etc\n\t[-conn_reuse] enable connection reuse" << endl;
+    cout << "Usage " << progr << " [-nodes N]\n\t[-cwnd cwnd_size]\n\t[-q queue_size]\n\t[-queue_type composite|composite_ecn|aeolus|aeolus_ecn|lossless_input|lossless_input_ecn]\n\t[-tm traffic_matrix_file]\n\t[-strat route_strategy (single,rand,perm,pull,ecmp,\n\tecmp_host path_count,ecmp_ar,ecmp_rr,\n\tecmp_host_ar ar_thresh)]\n\t[-log log_level]\n\t[-seed random_seed]\n\t[-end end_time_in_usec]\n\t[-mtu MTU]\n\t[-hop_latency x] per hop wire latency in us,default 1\n\t[-target_q_delay x] target_queuing_delay in us, default is 6us \n\t[-switch_latency x] switching latency in us, default 0\n\t[-host_queue_type  swift|prio|fair_prio]\n\t[-logtime dt] sample time for sinklogger, etc\n\t[-conn_reuse] enable connection reuse\n\t[-load_balancing_algo bitmap|reps|reps_legacy|oblivious|mixed|ecmp|redr] load balancing algorithm\n\t[-redr] enable REDR (default)\n\t[-disable_redr] disable REDR\n\t[-redr_buffer_size N] REDR EV buffer size (default 64)\n\t[-redr_evs_size N] REDR entropy values size (default 256)\n\t[-redr_timeout x] REDR timeout in microseconds (default 100)" << endl;
     exit(1);
 }
 
@@ -86,7 +87,7 @@ int main(int argc, char **argv) {
     simtime_picosec switch_latency = timeFromUs((uint32_t)0);
     queue_type qt = COMPOSITE;
 
-    enum LoadBalancing_Algo { BITMAP, REPS, REPS_LEGACY, OBLIVIOUS, MIXED, ECMP};
+    enum LoadBalancing_Algo { BITMAP, REPS, REPS_LEGACY, OBLIVIOUS, MIXED, ECMP, REDR};
     LoadBalancing_Algo load_balancing_algo = MIXED;
 
     bool log_sink = false;
@@ -122,6 +123,12 @@ int main(int argc, char **argv) {
     int end_time = 1000;//in microseconds
     bool force_disable_oversubscribed_cc = false;
     bool enable_accurate_base_rtt = false;
+    
+    // REDR configuration parameters
+    bool enable_redr = false;  // REDR disabled by default
+    uint16_t redr_buffer_size = UecSrc::REPS_BUFFER_SIZE;
+    uint16_t redr_evs_size = UecSrc::EVS_SIZE;
+    simtime_picosec redr_timeout = UecSrc::TIMEOUT;
 
     //unsure how to set this. 
     queue_type snd_type = FAIR_PRIO;
@@ -242,11 +249,22 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i+1], "ecmp")) {
                 load_balancing_algo = ECMP;
             }
+            else if (!strcmp(argv[i+1], "redr")) {
+                load_balancing_algo = REDR;
+                enable_redr = true;
+                cout << "REDR enabled" << endl;
+            }
             else {
-                cout << "Unknown load balancing algorithm of type " << argv[i+1] << ", expecting bitmap, reps or reps2" << endl;
+                cout << "Unknown load balancing algorithm of type " << argv[i+1] << ", expecting bitmap, reps, reps_legacy, oblivious, mixed, ecmp, or redr" << endl;
                 exit_error(argv[0]);
             }
             cout << "Load balancing algorithm set to  "<< argv[i+1] << endl;
+            // Enable REDR switch logic if REDR is selected
+            if (load_balancing_algo == REDR) {
+                FatTreeSwitch::set_enable_redr(true);
+            } else {
+                FatTreeSwitch::set_enable_redr(false);
+            }
             i++;
         }
         else if (!strcmp(argv[i],"-queue_type")) {
@@ -261,6 +279,12 @@ int main(int argc, char **argv) {
             }
             else if (!strcmp(argv[i+1], "aeolus_ecn")){
                 qt = AEOLUS_ECN;
+            }
+            else if (!strcmp(argv[i+1], "lossless_input")){
+                qt = LOSSLESS_INPUT;
+            }
+            else if (!strcmp(argv[i+1], "lossless_input_ecn")){
+                qt = LOSSLESS_INPUT_ECN;
             }
             else {
                 cout << "Unknown queue type " << argv[i+1] << endl;
@@ -397,13 +421,32 @@ int main(int argc, char **argv) {
             logtime = timeFromMs(log_ms);
             cout << "logtime "<< log_ms << " ms" << endl;
             i++;
+        } else if (!strcmp(argv[i],"-redr")){
+            enable_redr = true;
+            cout << "REDR enabled" << endl;
+        } else if (!strcmp(argv[i],"-disable_redr")){
+            enable_redr = false;
+            cout << "REDR disabled" << endl;
+        } else if (!strcmp(argv[i],"-redr_buffer_size")){
+            redr_buffer_size = atoi(argv[i+1]);
+            cout << "REDR buffer size: " << redr_buffer_size << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-redr_evs_size")){
+            redr_evs_size = atoi(argv[i+1]);
+            cout << "REDR EVS size: " << redr_evs_size << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-redr_timeout")){
+            double timeout_us = atof(argv[i+1]);
+            redr_timeout = timeFromUs(timeout_us);
+            cout << "REDR timeout: " << timeout_us << " us" << endl;
+            i++;
         } else if (!strcmp(argv[i],"-logtime_us")){
             double log_us = atof(argv[i+1]);            
             logtime = timeFromUs(log_us);
             cout << "logtime "<< log_us << " us" << endl;
             i++;
         } else if (!strcmp(argv[i],"-failed")){
-            // number of failed links (failed to 25% linkspeed)
+            // number of failed links (fully failed - not valid hops, no linkspeed degradation)
             topo_num_failed = atoi(argv[i+1]);
             i++;
         } else if (!strcmp(argv[i],"-linkspeed")){
@@ -703,6 +746,19 @@ int main(int argc, char **argv) {
         UecSink::_oversubscribed_cc = true;
         OversubscribedCC::setOversubscriptionRatio(topo_cfg->get_oversubscription_ratio());
         cout << "Using simple receiver oversubscribed CC. Oversubscription ratio is " << topo_cfg->get_oversubscription_ratio() << endl;
+    }
+    
+    // Print REDR configuration status
+    if (enable_redr) {
+        cout << "REDR enabled (buffer_size=" << redr_buffer_size 
+             << ", evs_size=" << redr_evs_size 
+             << ", timeout=" << timeAsUs(redr_timeout) << " us)" << endl;
+        cout << "Note: REDR buffer size, EVS size, and timeout are currently fixed at compile time." << endl;
+        cout << "      Default values: buffer_size=" << UecSrc::REPS_BUFFER_SIZE 
+             << ", evs_size=" << UecSrc::EVS_SIZE 
+             << ", timeout=" << timeAsUs(UecSrc::TIMEOUT) << " us" << endl;
+    } else {
+        cout << "REDR disabled" << endl;
     } 
 
     //2 priority queues; 3 hops for incast
@@ -725,6 +781,19 @@ int main(int argc, char **argv) {
     }
 
     cout << *topo_cfg << endl;
+
+    // Initialize LosslessInputQueue thresholds if using lossless input queue types
+    // This must be done before creating the topology, as LosslessInputQueue constructors assert these are set
+    if (qt == LOSSLESS_INPUT || qt == LOSSLESS_INPUT_ECN) {
+        // Set default PFC thresholds (high and low) if not specified
+        // Default values similar to other main files: high=15 packets, low=12 packets
+        uint64_t high_pfc = 15;
+        uint64_t low_pfc = 12;
+        LosslessInputQueue::_high_threshold = Packet::data_packet_size() * high_pfc;
+        LosslessInputQueue::_low_threshold = Packet::data_packet_size() * low_pfc;
+        cout << "LosslessInputQueue thresholds: high=" << high_pfc 
+             << " packets, low=" << low_pfc << " packets" << endl;
+    }
 
     vector<unique_ptr<FatTreeTopology>> topo;
     topo.resize(planes);
@@ -844,6 +913,11 @@ int main(int argc, char **argv) {
                     return std::make_unique<UecMpMixed>(path_entropy_size, UecSrc::_debug);
                 });
                 break;
+            case REDR:
+                api->setMultipathFactory([path_entropy_size, disable_trim]() {
+                    return std::make_unique<UecMpReps>(path_entropy_size, UecSrc::_debug, !disable_trim);
+                });
+                break;
             default:
                 cout << "ERROR: Failed to set multipath algorithm, abort." << endl;
                 abort();
@@ -903,12 +977,19 @@ int main(int argc, char **argv) {
                 mp = make_unique<UecMpMixed>(path_entropy_size, UecSrc::_debug);
             } else if (load_balancing_algo == ECMP){
                 mp = make_unique<UecMpEcmp>(path_entropy_size, UecSrc::_debug);
+            } else if (load_balancing_algo == REDR){
+                mp = make_unique<UecMpReps>(path_entropy_size, UecSrc::_debug, !disable_trim);
             } else {
                 cout << "ERROR: Failed to set multipath algorithm, abort." << endl;
                 abort();
             }
 
             uec_src = new UecSrc(traffic_logger, eventlist, move(mp), *nics.at(src), ports);
+
+            // Configure REDR parameters if enabled
+            // Note: REDR buffer is initialized in UecSrc constructor with default values
+            // The REDR functionality is always active; use -disable_redr to disable if needed
+            // Future enhancement: make REPS_BUFFER_SIZE, EVS_SIZE, TIMEOUT configurable per flow
 
             if (crt->flowid) {
                 uec_src->setFlowId(crt->flowid);

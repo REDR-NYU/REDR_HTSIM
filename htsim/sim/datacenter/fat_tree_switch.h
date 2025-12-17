@@ -123,6 +123,7 @@ public:
 
     static void set_strategy(routing_strategy s) { assert (_strategy==NIX); _strategy = s; }
     static void set_ar_fraction(uint16_t f) { assert(f>=1);_ar_fraction = f;} 
+    static void set_enable_redr(bool enable) { _enable_redr = enable; }
 
     static routing_strategy _strategy;
     static uint16_t _ar_fraction;
@@ -132,6 +133,7 @@ public:
     static double _speculative_threshold_fraction;
     static uint16_t _trim_size;
     static bool _disable_trim;
+    static bool _enable_redr;
 private:
     switch_type _type;
     Pipe* _pipe;
