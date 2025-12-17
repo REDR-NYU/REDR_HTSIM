@@ -7,6 +7,7 @@
 #include "queue_lossless.h"
 #include "queue_lossless_output.h"
 #include "queue_lossless_input.h"
+#include "uecpacket.h"
 
 unordered_map<BaseQueue*,uint32_t> FatTreeSwitch::_port_flow_counts;
 
@@ -344,6 +345,56 @@ int8_t (*FatTreeSwitch::fn)(FibEntry*,FibEntry*)= &FatTreeSwitch::compare_queues
 uint16_t FatTreeSwitch::_trim_size = 64;
 bool FatTreeSwitch::_disable_trim = false;
 bool FatTreeSwitch::_enable_redr = false;
+
+// REDR helper functions
+uint32_t FatTreeSwitch::computePrimaryHash(Packet& pkt, vector<FibEntry*>* available_hops) {
+    assert(available_hops && !available_hops->empty());
+    // Base hash on flow id and path id, salted per switch
+    uint32_t h = freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt);
+    return h % available_hops->size();
+}
+
+uint32_t FatTreeSwitch::computeBackupHash(Packet& pkt, vector<FibEntry*>* available_hops) {
+    assert(available_hops && !available_hops->empty());
+    // Simple deterministic alternative: next port after primary
+    uint32_t primary = computePrimaryHash(pkt, available_hops);
+    if (available_hops->size() == 1) {
+        return primary;
+    }
+    return (primary + 1) % available_hops->size();
+}
+
+bool FatTreeSwitch::portUp(uint32_t index, vector<FibEntry*>* available_hops) {
+    if (!available_hops || index >= available_hops->size()) {
+        return false;
+    }
+    FibEntry* e = (*available_hops)[index];
+    if (!e) {
+        return false;
+    }
+    Route* r = e->getEgressPort();
+    if (!r || r->size() == 0) {
+        return false;
+    }
+    // First element should be a queue; if it's null, treat link as down
+    BaseQueue* q = dynamic_cast<BaseQueue*>(r->at(0));
+    return q != nullptr;
+}
+
+bool FatTreeSwitch::portDown(uint32_t index, vector<FibEntry*>* available_hops) {
+    return !portUp(index, available_hops);
+}
+
+bool FatTreeSwitch::loopDetected(Packet& pkt) {
+    // For UEC data packets, consider another deflection as a potential loop
+    if (pkt.type() == UECDATA) {
+        UecDataPacket* uec_pkt = dynamic_cast<UecDataPacket*>(&pkt);
+        if (uec_pkt) {
+            return uec_pkt->is_deflected();
+        }
+    }
+    return false;
+}
 
 Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
     vector<FibEntry*> * available_hops = _fib->getRoutes(pkt.dst());

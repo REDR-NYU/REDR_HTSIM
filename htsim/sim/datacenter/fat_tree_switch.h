@@ -135,6 +135,13 @@ public:
     static bool _disable_trim;
     static bool _enable_redr;
 private:
+  // REDR helper functions
+  uint32_t computePrimaryHash(Packet& pkt, vector<FibEntry*>* available_hops);
+  uint32_t computeBackupHash(Packet& pkt, vector<FibEntry*>* available_hops);
+  bool portDown(uint32_t index, vector<FibEntry*>* available_hops);
+  bool portUp(uint32_t index, vector<FibEntry*>* available_hops);
+  bool loopDetected(Packet& pkt);
+
     switch_type _type;
     Pipe* _pipe;
     FatTreeTopology* _ft;

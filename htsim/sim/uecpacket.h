@@ -34,6 +34,13 @@ public:
     static pull_quanta quantize_floor(mem_b bytes); // quantize and round down
     static mem_b unquantize(pull_quanta credit_chunks);  // unquantize
     static mem_b get_ack_size() {return ACKSIZE;}
+
+    // REDR: track whether this packet has been deflected/rerouted
+    inline void set_deflected(bool deflected) { _deflected = deflected; }
+    inline bool is_deflected() const { return _deflected; }
+
+protected:
+    bool _deflected = false;
 };
 
 class UecDataPacket : public UecBasePacket {
@@ -64,6 +71,7 @@ public:
         p->set_dst(destination);
 
         p->_direction = NONE;
+        p->_deflected = false;
         p->_path_len = route.size();
         p->_trim_hop = {};
         p->_trim_direction = NONE;
@@ -164,6 +172,7 @@ public:
         p->_pathid = ev;
         //p->_rnr = rnr;
         p->_slow_pull = false;
+        p->_deflected = false;
         return p;
     }    
 
@@ -218,6 +227,7 @@ public:
 
         p->_recvd_bytes = recv_bytes;
         p->_rcv_cwnd_pen = rcv_wnd_pen;
+        p->_deflected = false;
         return p;
     }
   
@@ -303,6 +313,7 @@ public:
         p->_recvd_bytes = recv_bytes;
         p->_target_bytes = tbytes;
         p->_last_hop = false;
+        p->_deflected = false;
 
         return p;
     }
@@ -351,9 +362,10 @@ public:
         p->_bounced = false;
         p->_pull_target = pull_target;
         p->_epsn = epsn;
-        p->_direction = NONE;    
+        p->_direction = NONE;
 
         p->_ar = true; //always request ack.
+        p->_deflected = false;
         p->set_dst(destination);
         return p;
     }
