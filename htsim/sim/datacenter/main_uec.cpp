@@ -86,7 +86,7 @@ int main(int argc, char **argv) {
     simtime_picosec switch_latency = timeFromUs((uint32_t)0);
     queue_type qt = COMPOSITE;
 
-    enum LoadBalancing_Algo { BITMAP, REPS, REPS_LEGACY, OBLIVIOUS, MIXED, ECMP};
+    enum LoadBalancing_Algo { BITMAP, REPS, REPS_LEGACY, OBLIVIOUS, MIXED, ECMP, REDR};
     LoadBalancing_Algo load_balancing_algo = MIXED;
 
     bool log_sink = false;
@@ -242,8 +242,11 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i+1], "ecmp")) {
                 load_balancing_algo = ECMP;
             }
+            else if (!strcmp(argv[i+1], "redr")) {
+                load_balancing_algo = REDR;
+            }
             else {
-                cout << "Unknown load balancing algorithm of type " << argv[i+1] << ", expecting bitmap, reps or reps2" << endl;
+                cout << "Unknown load balancing algorithm of type " << argv[i+1] << ", expecting bitmap, reps, reps_legacy, oblivious, mixed, ecmp, or redr" << endl;
                 exit_error(argv[0]);
             }
             cout << "Load balancing algorithm set to  "<< argv[i+1] << endl;
@@ -547,7 +550,12 @@ int main(int argc, char **argv) {
 
     if (route_strategy==NOT_SET){
         route_strategy = ECMP_FIB;
-        FatTreeSwitch::set_strategy(FatTreeSwitch::ECMP);
+        // Set switch strategy based on load balancing algorithm
+        if (load_balancing_algo == REDR) {
+            FatTreeSwitch::set_strategy(FatTreeSwitch::REDR);
+        } else {
+            FatTreeSwitch::set_strategy(FatTreeSwitch::ECMP);
+        }
     }
 
     /*
@@ -844,6 +852,11 @@ int main(int argc, char **argv) {
                     return std::make_unique<UecMpMixed>(path_entropy_size, UecSrc::_debug);
                 });
                 break;
+            case REDR:
+                api->setMultipathFactory([path_entropy_size]() {
+                    return std::make_unique<UecMpRedr>(path_entropy_size, UecSrc::_debug);
+                });
+                break;
             default:
                 cout << "ERROR: Failed to set multipath algorithm, abort." << endl;
                 abort();
@@ -903,6 +916,8 @@ int main(int argc, char **argv) {
                 mp = make_unique<UecMpMixed>(path_entropy_size, UecSrc::_debug);
             } else if (load_balancing_algo == ECMP){
                 mp = make_unique<UecMpEcmp>(path_entropy_size, UecSrc::_debug);
+            } else if (load_balancing_algo == REDR){
+                mp = make_unique<UecMpRedr>(path_entropy_size, UecSrc::_debug);
             } else {
                 cout << "ERROR: Failed to set multipath algorithm, abort." << endl;
                 abort();
@@ -1123,6 +1138,11 @@ int main(int argc, char **argv) {
         sleek_pkts += s._sleek_counter;
     }
     cout << "New: " << new_pkts << " Rtx: " << rtx_pkts << " RTS: " << rts_pkts << " Bounced: " << bounce_pkts << " ACKs: " << ack_pkts << " NACKs: " << nack_pkts << " Pulls: " << pull_pkts << " sleek_pkts: " << sleek_pkts << endl;
+    
+    // Print REDR statistics if using REDR algorithm
+    if (load_balancing_algo == REDR) {
+        cout << "[REDR] Failed link encounters: " << FatTreeSwitch::get_redr_failed_link_count() << endl;
+    }
     /*
     list <const Route*>::iterator rt_i;
     int counts[10]; int hop;

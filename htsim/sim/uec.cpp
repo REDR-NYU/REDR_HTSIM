@@ -898,6 +898,15 @@ bool UecSrc::checkFinished(UecDataPacket::seq_t cum_ack) {
              << " rtx_queue " << _rtx_queue.size()
              << " done_sending " << _done_sending << endl;
 
+    // Print REDR statistics when flow finishes
+    if (_done_sending) {
+        UecMpRedr* redr_mp = dynamic_cast<UecMpRedr*>(_mp.get());
+        if (redr_mp) {
+            cout << "[REDR Flow Finished] Flow " << _flow.flow_id() << " (" << _flow.str() << ")" << endl;
+            redr_mp->printStats();
+        }
+    }
+
     return _done_sending;
 }
 
@@ -1056,7 +1065,18 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
     //assert(_in_flight >= 0);
 
 
-    _mp->processEv(pkt.ev(), pkt.ecn_echo() ? UecMultipath::PATH_ECN : UecMultipath::PATH_GOOD);
+    // For REDR, use the extended onAck method to pass ECN and deflected flags
+    UecMpRedr* redr_mp = dynamic_cast<UecMpRedr*>(_mp.get());
+    if (redr_mp) {
+        // Always log ACK reception for debugging
+        cout << "[REDR Src] ACK received: flow=" << _flow.flow_id()
+             << " ev=" << pkt.ev() << " acked_psn=" << pkt.acked_psn() << " cum_ack=" << cum_ack
+             << " deflected=" << pkt.deflected() << " ecn=" << pkt.ecn_echo() << endl;
+        // Always call onAck to track statistics
+        redr_mp->onAck(pkt.ev(), pkt.ecn_echo(), pkt.deflected());
+    } else {
+        _mp->processEv(pkt.ev(), pkt.ecn_echo() ? UecMultipath::PATH_ECN : UecMultipath::PATH_GOOD);
+    }
 
     if(_flow.flow_id() == _debug_flowid ){
         cout <<  timeAsUs(eventlist().now()) << " flowid " << _flow.flow_id() << " track_avg_rtt " << timeAsUs(get_avg_delay())
@@ -1622,10 +1642,19 @@ void UecSrc::processNack(const UecNackPacket& pkt) {
         recalculateRTO();
     }
 
-    if (pkt.last_hop())
-        _mp->processEv(ev, pkt.ecn_echo() ? UecMultipath::PATH_ECN : UecMultipath::PATH_GOOD);
-    else
-        _mp->processEv(ev, UecMultipath::PATH_NACK);
+    // For REDR, use the extended onAck method
+    UecMpRedr* redr_mp = dynamic_cast<UecMpRedr*>(_mp.get());
+    if (redr_mp) {
+        if (pkt.last_hop())
+            redr_mp->onAck(ev, pkt.ecn_echo(), false);  // NACK doesn't have deflected flag
+        else
+            redr_mp->onAck(ev, false, false);  // NACK
+    } else {
+        if (pkt.last_hop())
+            _mp->processEv(ev, pkt.ecn_echo() ? UecMultipath::PATH_ECN : UecMultipath::PATH_GOOD);
+        else
+            _mp->processEv(ev, UecMultipath::PATH_NACK);
+    }
 
     sendIfPermitted();
 }
@@ -2108,6 +2137,12 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
     uint16_t ev = _mp->nextEntropy(_highest_sent, (uint64_t)_cwnd/_mss);
     p->set_pathid(ev);
     p->flow().logTraffic(*p, *this, TrafficLogger::PKT_CREATESEND);
+
+    UecMpRedr* redr_mp = dynamic_cast<UecMpRedr*>(_mp.get());
+    if (redr_mp) {
+        //cout << "[REDR Src] Sending packet: flow=" << _flow.flow_id() << " seq=" << _highest_sent
+        //     << " NEW_EV=" << ev << " cwnd=" << _cwnd << " in_flight=" << _in_flight << endl;
+    }
 
     if (_backlog == 0 || (_receiver_based_cc && _credit <= 0) || ( _sender_based_cc &&  (_in_flight + full_pkt_size) >= _cwnd )) 
         p->set_ar(true);
@@ -2594,10 +2629,22 @@ void UecSink::handlePullTarget(UecBasePacket::seq_t pt) {
 
 void UecSink::processData(UecDataPacket& pkt) {
     bool force_ack = false;
+    
+    // Debug output for deflected packets
+    if (pkt.deflected()) {
+        cout << "[REDR Sink] Received DEFLECTED data packet: flow=" << _src->flow()->flow_id()
+             << " epsn=" << pkt.epsn() << " deflected=" << pkt.deflected() << endl;
+    }
+    
     if (pkt.packet_type() == UecBasePacket::DATA_PROBE){
         UecAckPacket* ack_packet =
             sack(pkt.path_id(), sackBitmapBase(pkt.epsn()), pkt.epsn(), (bool)(pkt.flags() & ECN_CE), pkt.retransmitted());
         ack_packet->set_probe_ack(true);
+        ack_packet->set_deflected(pkt.deflected());
+        if (pkt.deflected()) {
+            cout << "[REDR Sink] Probe ACK for DEFLECTED packet: flow=" << _src->flow()->flow_id()
+                 << " epsn=" << pkt.epsn() << " ack_deflected=" << ack_packet->deflected() << endl;
+        }
         _nic.sendControlPacket(ack_packet, NULL, this);   
         return;     
     }
@@ -2673,6 +2720,11 @@ void UecSink::processData(UecDataPacket& pkt) {
         // the ACK state of OOO packets.
         UecAckPacket* ack_packet =
             sack(pkt.path_id(), ecn ? pkt.epsn() : sackBitmapBase(pkt.epsn()), pkt.epsn(), ecn, pkt.retransmitted());
+        ack_packet->set_deflected(pkt.deflected());
+        if (pkt.deflected()) {
+            cout << "[REDR Sink] Duplicate ACK for DEFLECTED packet: flow=" << _src->flow()->flow_id()
+                 << " epsn=" << pkt.epsn() << " ack_deflected=" << ack_packet->deflected() << endl;
+        }
         _nic.sendControlPacket(ack_packet, NULL, this);
 
         _accepted_bytes = 0;  // careful about this one.
@@ -2738,6 +2790,11 @@ void UecSink::processData(UecDataPacket& pkt) {
     if (ecn || shouldSack() || force_ack) {
         UecAckPacket* ack_packet =
             sack(pkt.path_id(), (ecn || pkt.ar()) ? pkt.epsn() : sackBitmapBase(pkt.epsn()), pkt.epsn(), ecn, pkt.retransmitted());
+        // Copy deflected flag from data packet to ACK packet
+        ack_packet->set_deflected(pkt.deflected());
+        cout << "[REDR Sink] Creating ACK: flow=" << _src->flow()->flow_id()
+             << " epsn=" << pkt.epsn() << " acked_psn=" << ack_packet->acked_psn()
+             << " data_deflected=" << pkt.deflected() << " ack_deflected=" << ack_packet->deflected() << endl;
 
         if (_src->debug()) {
             cout << " UecSink " << _nodename << " src " << _src->nodename()
@@ -2784,6 +2841,7 @@ void UecSink::processTrimmed(const UecDataPacket& pkt) {
                  << _src->flow()->str() << endl;
 
         UecAckPacket* ack_packet = sack(pkt.path_id(), sackBitmapBase(pkt.epsn()), pkt.epsn(), false, pkt.retransmitted());
+        ack_packet->set_deflected(pkt.deflected());
         //ack_packet->sendOn();
         _nic.sendControlPacket(ack_packet, NULL, this);
         return;
@@ -2855,6 +2913,7 @@ void UecSink::processRts(const UecRtsPacket& pkt) {
         // the ACK state of OOO packets.
         UecAckPacket* ack_packet = sack(pkt.path_id(), sackBitmapBase(pkt.epsn()), pkt.epsn(), ecn, pkt.retransmitted());
         ack_packet->set_is_rts(true);
+        ack_packet->set_deflected(pkt.deflected());
         _nic.sendControlPacket(ack_packet, NULL, this);
 
         _accepted_bytes = 0;  // careful about this one.
@@ -2885,6 +2944,7 @@ void UecSink::processRts(const UecRtsPacket& pkt) {
     UecAckPacket* ack_packet =
         sack(pkt.path_id(), (ecn || pkt.ar()) ? pkt.epsn() : sackBitmapBase(pkt.epsn()), pkt.epsn(), ecn, pkt.retransmitted());
     ack_packet->set_is_rts(true);
+    ack_packet->set_deflected(pkt.deflected());
     if (_src->debug())
         cout << " UecSink " << _nodename << " src " << _src->nodename()
              << " send ack now: " << _expected_epsn << " ooo count " << _out_of_order_count

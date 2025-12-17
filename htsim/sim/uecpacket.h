@@ -59,6 +59,7 @@ public:
         p->_pull_target = pull_target;
         p->_syn = false;
         p->_fin = false;
+        p->_deflected = false;
         
         p->_ar = false;
         p->set_dst(destination);
@@ -100,6 +101,8 @@ public:
     inline pull_quanta pull_target() const {return _pull_target;}
     inline bool retransmitted() const {return _packet_type == DATA_RTX;}
     inline void set_ar(bool ar){ _ar = ar;}
+    inline void set_deflected(bool deflected) {_deflected = deflected;}
+    inline bool deflected() const {return _deflected;}
 
     inline PacketType type() const {return _packet_type;}
 
@@ -130,6 +133,7 @@ protected:
     bool _ar;
     bool _syn;
     bool _fin;
+    bool _deflected;  // Flag indicating packet was deflected at switch
 
     PacketType _packet_type;
 
@@ -214,6 +218,7 @@ public:
         p->_direction = NONE;
         p->_sack_bitmap = 0;
         p->_ecn_echo = ecn_marked;
+        p->_deflected = false;  // Initialize to false
         p->set_dst(destination);
 
         p->_recvd_bytes = recv_bytes;
@@ -237,6 +242,8 @@ public:
     /* inline pull_quanta pullno() const {return _pullno;}*/
     uint16_t  ev() const {return _ev;}
     inline bool ecn_echo() const {return _ecn_echo;}
+    inline void set_deflected(bool deflected) {_deflected = deflected;}
+    inline bool deflected() const {return _deflected;}
     uint64_t bitmap() const {return _sack_bitmap;}
     virtual PktPriority priority() const {return Packet::PRIO_HI;}
     
@@ -262,6 +269,7 @@ protected:
 
     bool _rnr;
     bool _ecn_echo;
+    bool _deflected;  // Flag indicating packet was deflected at switch
     bool _rtx_echo;
     bool _is_rts = false;
     simtime_picosec _residency_time;

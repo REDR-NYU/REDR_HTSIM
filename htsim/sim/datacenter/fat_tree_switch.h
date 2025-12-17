@@ -88,7 +88,7 @@ public:
     };
 
     enum routing_strategy {
-        NIX = 0, ECMP = 1, ADAPTIVE_ROUTING = 2, ECMP_ADAPTIVE = 3, RR = 4, RR_ECMP = 5
+        NIX = 0, ECMP = 1, ADAPTIVE_ROUTING = 2, ECMP_ADAPTIVE = 3, RR = 4, RR_ECMP = 5, REDR = 6
     };
 
     enum sticky_choices {
@@ -123,6 +123,8 @@ public:
 
     static void set_strategy(routing_strategy s) { assert (_strategy==NIX); _strategy = s; }
     static void set_ar_fraction(uint16_t f) { assert(f>=1);_ar_fraction = f;} 
+    static uint64_t get_redr_failed_link_count() { return _redr_failed_link_count; }
+    static void reset_redr_failed_link_count() { _redr_failed_link_count = 0; }
 
     static routing_strategy _strategy;
     static uint16_t _ar_fraction;
@@ -132,6 +134,7 @@ public:
     static double _speculative_threshold_fraction;
     static uint16_t _trim_size;
     static bool _disable_trim;
+    static uint64_t _redr_failed_link_count;
 private:
     switch_type _type;
     Pipe* _pipe;

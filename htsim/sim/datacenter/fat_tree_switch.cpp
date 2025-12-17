@@ -5,6 +5,7 @@
 #include "callback_pipe.h"
 #include "queue_lossless.h"
 #include "queue_lossless_output.h"
+#include "uecpacket.h"
 
 unordered_map<BaseQueue*,uint32_t> FatTreeSwitch::_port_flow_counts;
 
@@ -46,7 +47,13 @@ void FatTreeSwitch::receivePacket(Packet& pkt){
 
         _packets[&pkt] = true;
 
-        const Route * nh = getNextHop(pkt,NULL);
+        Route * nh = getNextHop(pkt,NULL);
+        if (!nh) {
+            // No route available - drop packet
+            _packets.erase(&pkt);
+            pkt.free();
+            return;
+        }
         //set next hop which is peer switch.
         pkt.set_route(*nh);
 
@@ -317,6 +324,7 @@ void FatTreeSwitch::permute_paths(vector<FibEntry *>* uproutes) {
 
 FatTreeSwitch::routing_strategy FatTreeSwitch::_strategy = FatTreeSwitch::NIX;
 uint16_t FatTreeSwitch::_ar_fraction = 0;
+uint64_t FatTreeSwitch::_redr_failed_link_count = 0;
 uint16_t FatTreeSwitch::_ar_sticky = FatTreeSwitch::PER_PACKET;
 simtime_picosec FatTreeSwitch::_sticky_delta = timeFromUs((uint32_t)10);
 double FatTreeSwitch::_ecn_threshold_fraction = 0.2;
@@ -407,6 +415,158 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
                 else ecmp_choice = freeBSDHash(pkt.flow_id(),pkt.pathid(),_hash_salt) % available_hops->size();
                 
                 break;
+            case REDR: {
+                // Algorithm: REDR Logic at the switch upon packet arrival
+                // For REDR, hash into total possible links, then check if that link exists
+                uint16_t old_ev = pkt.pathid();
+                BaseQueue* primary_queue = NULL;
+                BaseQueue* backup_queue = NULL;
+                uint32_t primary_route_idx = 0;
+                uint32_t backup_route_idx = 0;
+                bool primary_failed = false;
+                bool backup_found = false;
+                
+                if (_type == AGG) {
+                    if (_ft->cfg().get_tiers()==2 || _ft->cfg().HOST_POD(pkt.dst()) == _ft->cfg().AGG_SWITCH_POD_ID(_id)) {
+                        // Routing DOWN to TOR
+                        uint32_t target_tor = _ft->cfg().HOST_POD_SWITCH(pkt.dst());
+                        uint32_t total_bundles = _ft->cfg().bundlesize(AGG_TIER);
+                        uint32_t primary_bundle = freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt) % total_bundles;
+                        uint32_t backup_bundle = freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt + 1) % total_bundles;
+                        
+                        // Check primary link
+                        primary_queue = _ft->queues_nup_nlp[_id][target_tor][primary_bundle];
+                        if (!primary_queue || !_ft->pipes_nup_nlp[_id][target_tor][primary_bundle]) {
+                            primary_failed = true;
+                            _redr_failed_link_count++;
+                            // Find backup in available_hops
+                            backup_queue = _ft->queues_nup_nlp[_id][target_tor][backup_bundle];
+                            if (backup_queue && _ft->pipes_nup_nlp[_id][target_tor][backup_bundle]) {
+                                // Find backup route in available_hops
+                                for (uint32_t i = 0; i < available_hops->size(); i++) {
+                                    Route* r = (*available_hops)[i]->getEgressPort();
+                                    if (r && r->size() > 0) {
+                                        BaseQueue* q = dynamic_cast<BaseQueue*>(r->at(0));
+                                        if (q == backup_queue) {
+                                            backup_route_idx = i;
+                                            backup_found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Find primary in available_hops
+                            for (uint32_t i = 0; i < available_hops->size(); i++) {
+                                Route* r = (*available_hops)[i]->getEgressPort();
+                                if (r && r->size() > 0) {
+                                    BaseQueue* q = dynamic_cast<BaseQueue*>(r->at(0));
+                                    if (q == primary_queue) {
+                                        primary_route_idx = i;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Routing UP to CORE
+                        uint32_t podpos = _id % _ft->cfg().agg_switches_per_pod();
+                        uint32_t total_links = _ft->cfg().radix_up(AGG_TIER);
+                        uint32_t primary_link = freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt) % total_links;
+                        uint32_t backup_link = freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt + 1) % total_links;
+                        
+                        // Convert link index to core and bundle
+                        uint32_t primary_l = primary_link / _ft->cfg().bundlesize(CORE_TIER);
+                        uint32_t primary_b = primary_link % _ft->cfg().bundlesize(CORE_TIER);
+                        uint32_t primary_core = podpos + _ft->cfg().agg_switches_per_pod() * primary_l;
+                        
+                        uint32_t backup_l = backup_link / _ft->cfg().bundlesize(CORE_TIER);
+                        uint32_t backup_b = backup_link % _ft->cfg().bundlesize(CORE_TIER);
+                        uint32_t backup_core = podpos + _ft->cfg().agg_switches_per_pod() * backup_l;
+                        
+                        // Check primary link
+                        if (primary_core >= _ft->cfg().no_of_cores() || 
+                            !_ft->queues_nup_nc[_id][primary_core][primary_b] || 
+                            !_ft->pipes_nup_nc[_id][primary_core][primary_b]) {
+                            primary_failed = true;
+                            _redr_failed_link_count++;
+                            cout << "[REDR Switch] Detected failed link (AGG UP): switch=" << _type << ":" << _id
+                                 << " primary_core=" << primary_core << " bundle=" << primary_b
+                                 << " primary_link=" << primary_link << " flow=" << pkt.flow_id()
+                                 << " total_failures=" << _redr_failed_link_count << endl;
+                            // Check backup link
+                            if (backup_core < _ft->cfg().no_of_cores() && 
+                                _ft->queues_nup_nc[_id][backup_core][backup_b] && 
+                                _ft->pipes_nup_nc[_id][backup_core][backup_b]) {
+                                backup_queue = _ft->queues_nup_nc[_id][backup_core][backup_b];
+                                // Find backup route in available_hops
+                                for (uint32_t i = 0; i < available_hops->size(); i++) {
+                                    Route* r = (*available_hops)[i]->getEgressPort();
+                                    if (r && r->size() > 0) {
+                                        BaseQueue* q = dynamic_cast<BaseQueue*>(r->at(0));
+                                        if (q == backup_queue) {
+                                            backup_route_idx = i;
+                                            backup_found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            primary_queue = _ft->queues_nup_nc[_id][primary_core][primary_b];
+                            // Find primary in available_hops
+                            for (uint32_t i = 0; i < available_hops->size(); i++) {
+                                Route* r = (*available_hops)[i]->getEgressPort();
+                                if (r && r->size() > 0) {
+                                    BaseQueue* q = dynamic_cast<BaseQueue*>(r->at(0));
+                                    if (q == primary_queue) {
+                                        primary_route_idx = i;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // TOR or CORE: fall back to ECMP behavior (hash into available routes)
+                    primary_route_idx = freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt) % available_hops->size();
+                    backup_route_idx = freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt + 1) % available_hops->size();
+                    
+                    Route* primary_route = (*available_hops)[primary_route_idx]->getEgressPort();
+                    primary_queue = (primary_route && primary_route->size() > 0) ? 
+                        dynamic_cast<BaseQueue*>(primary_route->at(0)) : NULL;
+                    primary_failed = (primary_queue == NULL);
+                    if (primary_failed) {
+                        _redr_failed_link_count++;
+                        cout << "[REDR Switch] Detected failed link (TOR/CORE): switch=" << _type << ":" << _id
+                             << " primary_route_idx=" << primary_route_idx << " flow=" << pkt.flow_id()
+                             << " total_failures=" << _redr_failed_link_count << endl;
+                    }
+                    
+                    if (primary_failed && backup_route_idx != primary_route_idx) {
+                        Route* backup_route = (*available_hops)[backup_route_idx]->getEgressPort();
+                        backup_queue = (backup_route && backup_route->size() > 0) ? 
+                            dynamic_cast<BaseQueue*>(backup_route->at(0)) : NULL;
+                        backup_found = (backup_queue != NULL);
+                    }
+                }
+                
+                if (primary_failed && backup_found) {
+                    // Use backup and mark as deflected
+                    ecmp_choice = backup_route_idx;
+                    UecDataPacket* uec_pkt = dynamic_cast<UecDataPacket*>(&pkt);
+                    if (uec_pkt) {
+                        uec_pkt->set_deflected(true);
+                        cout << "[REDR Switch] DEFLECTING: switch=" << _type << ":" << _id
+                             << " flow=" << pkt.flow_id() << " dst=" << pkt.dst()
+                             << " old_ev=" << old_ev << " -> backup_route_idx=" << backup_route_idx << endl;
+                    }
+                } else {
+                    // Use primary (or first available if both failed)
+                    ecmp_choice = primary_failed ? 0 : primary_route_idx;
+                }
+                break;
+            }
             }
         
         FibEntry* e = (*available_hops)[ecmp_choice];
@@ -442,6 +602,10 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
 
                 for (uint32_t k=agg_min; k<=agg_max;k++){
                     for (uint32_t b = 0; b < _ft->cfg().bundlesize(AGG_TIER); b++) {
+                        // Skip failed links (NULL queues)
+                        if (!_ft->queues_nlp_nup[_id][k][b] || !_ft->pipes_nlp_nup[_id][k][b]) {
+                            continue;
+                        }
                         Route * r = new Route();
                         r->push_back(_ft->queues_nlp_nup[_id][k][b]);
                         assert(((BaseQueue*)r->at(0))->getSwitch() == this);
@@ -457,7 +621,9 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
                     */
                 }
                 _uproutes = _fib->getRoutes(pkt.dst());
-                permute_paths(_uproutes);
+                if (_uproutes) {
+                    permute_paths(_uproutes);
+                }
             }
         }
     } else if (_type == AGG) {
@@ -466,6 +632,10 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
             //target NLP id is 2 * pkt.dst()/K
             uint32_t target_tor = _ft->cfg().HOST_POD_SWITCH(pkt.dst());
             for (uint32_t b = 0; b < _ft->cfg().bundlesize(AGG_TIER); b++) {
+                // Skip failed links (NULL queues or pipes)
+                if (!_ft->queues_nup_nlp[_id][target_tor][b] || !_ft->pipes_nup_nlp[_id][target_tor][b]) {
+                    continue;
+                }
                 Route * r = new Route();
                 r->push_back(_ft->queues_nup_nlp[_id][target_tor][b]);
                 assert(((BaseQueue*)r->at(0))->getSwitch() == this);
@@ -482,9 +652,13 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
             else {
                 uint32_t podpos = _id % _ft->cfg().agg_switches_per_pod();
                 uint32_t uplink_bundles = _ft->cfg().radix_up(AGG_TIER) / _ft->cfg().bundlesize(CORE_TIER);
-                for (uint32_t l = 0; l <  uplink_bundles ; l++) {
+                    for (uint32_t l = 0; l <  uplink_bundles ; l++) {
                     uint32_t core = l * _ft->cfg().agg_switches_per_pod() + podpos;
                     for (uint32_t b = 0; b < _ft->cfg().bundlesize(CORE_TIER); b++) {
+                        // Skip failed links (NULL queues)
+                        if (!_ft->queues_nup_nc[_id][core][b] || !_ft->pipes_nup_nc[_id][core][b]) {
+                            continue;
+                        }
                         Route *r = new Route();
                         r->push_back(_ft->queues_nup_nc[_id][core][b]);
                         assert(((BaseQueue*)r->at(0))->getSwitch() == this);
@@ -503,20 +677,25 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
                     }
                 }
                 //_uproutes = _fib->getRoutes(pkt.dst());
-                permute_paths(_fib->getRoutes(pkt.dst()));
+                vector<FibEntry*>* routes = _fib->getRoutes(pkt.dst());
+                if (routes) {
+                    permute_paths(routes);
+                }
             }
         }
     } else if (_type == CORE) {
         uint32_t nup = _ft->cfg().MIN_POD_AGG_SWITCH(_ft->cfg().HOST_POD(pkt.dst())) + (_id % _ft->cfg().agg_switches_per_pod());
         for (uint32_t b = 0; b < _ft->cfg().bundlesize(CORE_TIER); b++) {
+            // Skip failed links (NULL queues)
+            if (!_ft->queues_nc_nup[_id][nup][b] || !_ft->pipes_nc_nup[_id][nup][b]) {
+                continue;
+            }
             Route *r = new Route();
             //cout << "CORE switch " << _id << " adding route to " << pkt.dst() << " via AGG " << nup << endl;
 
-            assert (_ft->queues_nc_nup[_id][nup][b]);
             r->push_back(_ft->queues_nc_nup[_id][nup][b]);
             assert(((BaseQueue*)r->at(0))->getSwitch() == this);
 
-            assert (_ft->pipes_nc_nup[_id][nup][b]);
             r->push_back(_ft->pipes_nc_nup[_id][nup][b]);
 
             r->push_back(_ft->queues_nc_nup[_id][nup][b]->getRemoteEndpoint());
@@ -527,7 +706,27 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
         cerr << "Route lookup on switch with no proper type: " << _type << endl;
         abort();
     }
-    assert(_fib->getRoutes(pkt.dst()));
+    
+    // Check if routes were actually created (some links might be failed)
+    vector<FibEntry*>* routes = _fib->getRoutes(pkt.dst());
+    if (!routes || routes->empty()) {
+        // No routes available (all links failed) - drop packet
+        cerr << "Warning: No routes available for destination " << pkt.dst() 
+             << " on switch " << _type << ":" << _id;
+        if (_type == AGG) {
+            if (_ft->cfg().get_tiers()==2 || _ft->cfg().HOST_POD(pkt.dst()) == _ft->cfg().AGG_SWITCH_POD_ID(_id)) {
+                cerr << " (routing DOWN, target_tor=" << _ft->cfg().HOST_POD_SWITCH(pkt.dst()) 
+                     << ", bundlesize=" << _ft->cfg().bundlesize(AGG_TIER) << ")";
+            } else {
+                uint32_t podpos = _id % _ft->cfg().agg_switches_per_pod();
+                uint32_t uplink_bundles = _ft->cfg().radix_up(AGG_TIER) / _ft->cfg().bundlesize(CORE_TIER);
+                cerr << " (routing UP, podpos=" << podpos << ", uplink_bundles=" << uplink_bundles << ")";
+            }
+        }
+        cerr << " (all links failed)" << endl;
+        // Return NULL route to indicate packet should be dropped
+        return NULL;
+    }
 
     //FIB has been filled in; return choice. 
     return getNextHop(pkt, ingress_port);

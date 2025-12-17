@@ -1,5 +1,6 @@
 
 #include "uec_mp.h"
+#include "config.h"
 
 #include <iostream>
 
@@ -306,4 +307,184 @@ void UecMpEcmp::processEv(uint16_t path_id, PathFeedback feedback) {
 uint16_t UecMpEcmp::nextEntropy(uint64_t seq_sent, uint64_t cur_cwnd_in_pkts) {
     // Always same path for a given flow in ECMP
     return _crt_path;
+}
+
+const simtime_picosec UecMpRedr::TIMEOUT = timeFromUs((uint32_t)1000);
+
+UecMpRedr::UecMpRedr(uint16_t no_of_paths, bool debug)
+    : UecMultipath(debug),
+      _no_of_paths(no_of_paths),
+      _head(0),
+      _validEVs(0),
+      _exploreCounter(16),  // Start with initial exploration phase
+      _deflected_packets_total(0),
+      _deflected_packets_acked(0) {
+    
+    _EVbuffer.resize(REPS_BUFFER_SIZE);
+    
+    if (_debug)
+        cout << "Multipath"
+            << " REDR"
+            << " _no_of_paths " << _no_of_paths
+            << " REPS_BUFFER_SIZE " << REPS_BUFFER_SIZE
+            << endl;
+}
+
+void UecMpRedr::processEv(uint16_t path_id, PathFeedback feedback) {
+    // Standard interface - convert to REDR-specific call
+    // For REDR, we use onAck which is called separately from UecSrc
+    // This is a fallback that shouldn't normally be called for REDR
+    // but we implement it for interface compatibility
+    bool ecn = (feedback == PATH_ECN);
+    bool deflected = false;  // We don't have this info here, will be set via onAck
+    onAck(path_id, ecn, deflected);
+}
+
+void UecMpRedr::onAck(uint16_t ev, bool ecn, bool deflected) {
+    processAckInternal(ev, ecn, deflected);
+}
+
+void UecMpRedr::processAckInternal(uint16_t ev, bool ecn, bool deflected) {
+    // Algorithm: onAck procedure
+    if (_debug) {
+        cout << "[REDR onAck] t=" << timeAsUs(EventList::getTheEventList().now()) 
+             << " ev=" << ev << " ecn=" << ecn << " deflected=" << deflected
+             << " head=" << _head << " validEVs=" << _validEVs << endl;
+    }
+    
+    if (ecn) {
+        if (_debug) {
+            cout << "[REDR onAck] ECN detected, skipping ACK processing" << endl;
+        }
+        return;  // If ECN is set, return early (don't process this ACK)
+    }
+    
+    _EVbuffer[_head].cachedEV = ev;
+    
+    if (deflected) {
+        _deflected_packets_total++;
+        _deflected_packets_acked++;  // This ACK means the deflected packet was successfully received
+        _EVbuffer[_head].isFrozen = true;
+        _EVbuffer[_head].unfreeze = EventList::getTheEventList().now() + TIMEOUT;
+        // Don't mark as valid or increment _validEVs for deflected packets
+        // Just advance head and return
+        if (_debug) {
+            cout << "[REDR onAck] PACKET DEFLECTED! ev=" << ev 
+                 << " - freezing path, unfreeze at t=" << timeAsUs(_EVbuffer[_head].unfreeze)
+                 << " (timeout=" << timeAsUs(TIMEOUT) << ")" << endl;
+        }
+        _head = (_head + 1) % REPS_BUFFER_SIZE;
+        return;
+    }
+    
+    // Not deflected - mark as valid and advance head
+    if (!_EVbuffer[_head].isValid) {
+        _validEVs++;
+        if (_debug) {
+            cout << "[REDR onAck] New valid EV added: ev=" << ev 
+                 << " validEVs now=" << _validEVs << endl;
+        }
+    } else {
+        if (_debug) {
+            cout << "[REDR onAck] Updating existing valid EV: ev=" << ev << endl;
+        }
+    }
+    
+    _EVbuffer[_head].isValid = true;
+    _EVbuffer[_head].isFrozen = false;  // Clear frozen state for non-deflected
+    _head = (_head + 1) % REPS_BUFFER_SIZE;
+    
+    if (_debug) {
+        cout << "[REDR onAck] Successfully processed ACK, head now=" << _head << endl;
+    }
+}
+
+uint16_t UecMpRedr::getNextEV() {
+    // Algorithm: getNextEV procedure
+    uint32_t offset = 0;
+    
+    if (_validEVs > 0) {
+        offset = (_head - _validEVs + REPS_BUFFER_SIZE) % REPS_BUFFER_SIZE;
+        uint16_t old_ev = _EVbuffer[offset].cachedEV;
+        bool was_frozen = _EVbuffer[offset].isFrozen;
+        _EVbuffer[offset].isValid = false;
+        _validEVs--;
+        
+        if (_debug) {
+            cout << "[REDR getNextEV] Retrieved ev=" << old_ev 
+                 << " from offset=" << offset << " (was_frozen=" << was_frozen << ")"
+                 << " validEVs now=" << _validEVs << endl;
+        }
+        
+        if (_EVbuffer[offset].isFrozen) {
+            simtime_picosec now = EventList::getTheEventList().now();
+            if (_EVbuffer[offset].unfreeze > now) {
+                // Still frozen, recursively call to get next
+                if (_debug) {
+                    cout << "[REDR getNextEV] Path still frozen (unfreeze at " 
+                         << timeAsUs(_EVbuffer[offset].unfreeze) << "), getting next EV" << endl;
+                }
+                return getNextEV();
+            } else {
+                _EVbuffer[offset].clonePacket = true;
+                if (_debug) {
+                    cout << "[REDR getNextEV] Path unfrozen, will clone packet for ev=" << old_ev << endl;
+                }
+            }
+        }
+        
+        return old_ev;
+    }
+    
+    if (_debug) {
+        cout << "[REDR getNextEV] No valid EVs available!" << endl;
+    }
+    
+    return 0;  // Should not happen if called correctly
+}
+
+uint16_t UecMpRedr::nextEntropy(uint64_t seq_sent, uint64_t cur_cwnd_in_pkts) {
+    // Algorithm: onSend procedure
+    // Explore initially or if buffer is empty
+    if (_exploreCounter > 0) {
+        uint16_t explore_ev = rand() % EVS_SIZE;
+        _exploreCounter--;
+        if (_debug) {
+            cout << "[REDR nextEntropy] EXPLORING: ev=" << explore_ev 
+                 << " (exploreCounter=" << _exploreCounter << " remaining)" << endl;
+        }
+        return explore_ev;
+    }
+    
+    // If buffer is empty or no valid EVs, explore
+    if (_validEVs == 0) {
+        uint16_t explore_ev = rand() % EVS_SIZE;
+        if (_debug) {
+            cout << "[REDR nextEntropy] Buffer empty, EXPLORING: ev=" << explore_ev 
+                 << " validEVs=" << _validEVs << endl;
+        }
+        return explore_ev;
+    }
+    
+    // Use the buffer - get next EV from circular buffer
+    uint16_t ev = getNextEV();
+    if (_debug) {
+        cout << "[REDR nextEntropy] Using buffer: ev=" << ev 
+             << " seq=" << seq_sent << " cwnd=" << cur_cwnd_in_pkts << endl;
+    }
+    return ev;
+}
+
+void UecMpRedr::printStats() const {
+    cout << "\n========== REDR Statistics ==========" << endl;
+    cout << "Total deflected packets (ACKed): " << _deflected_packets_total << endl;
+    cout << "Deflected packets successfully ACKed: " << _deflected_packets_acked << endl;
+    if (_deflected_packets_total > 0) {
+        // All deflected packets we track are successfully ACKed (we only track them when ACKed)
+        cout << "Deflection ACK success rate: 100.0%" << endl;
+    } else {
+        cout << "No deflected packets were ACKed" << endl;
+    }
+    cout << "Valid EVs in buffer: " << _validEVs << endl;
+    cout << "=====================================\n" << endl;
 }

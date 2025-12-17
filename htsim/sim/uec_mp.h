@@ -105,4 +105,42 @@ private:
     uint16_t _crt_path;
 };
 
+class UecMpRedr : public UecMultipath {
+public:
+    UecMpRedr(uint16_t no_of_paths, bool debug);
+    void processEv(uint16_t path_id, PathFeedback feedback) override;
+    uint16_t nextEntropy(uint64_t seq_sent, uint64_t cur_cwnd_in_pkts) override;
+    // Extended method for REDR to handle ACK with ECN and deflected flags
+    void onAck(uint16_t ev, bool ecn, bool deflected);
+    // Print statistics about deflections
+    void printStats() const;
+private:
+    // Statistics
+    uint64_t _deflected_packets_total;      // Total packets that were deflected (ACKed)
+    uint64_t _deflected_packets_acked;      // Deflected packets that were successfully ACKed
+    struct EVEntry {
+        uint16_t cachedEV;
+        bool isValid;
+        bool isFrozen;
+        simtime_picosec unfreeze;
+        bool clonePacket;
+        
+        EVEntry() : cachedEV(0), isValid(false), isFrozen(false), unfreeze(0), clonePacket(false) {}
+    };
+    
+    static const uint32_t REPS_BUFFER_SIZE = 64;  // BUFFER_SIZE in algorithm
+    static const uint32_t EVS_SIZE = 64;  // EVS_SIZE in algorithm
+    static const simtime_picosec TIMEOUT;  // TIMEOUT in microseconds (initialized in .cpp)
+    
+    vector<EVEntry> _EVbuffer;
+    uint32_t _head;
+    uint32_t _validEVs;
+    uint32_t _exploreCounter;
+    uint16_t _no_of_paths;
+    
+    // Helper methods
+    uint16_t getNextEV();
+    void processAckInternal(uint16_t ev, bool ecn, bool deflected);
+};
+
 #endif  // UEC_MP_H
