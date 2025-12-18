@@ -554,6 +554,12 @@ UecSrc::UecSrc(TrafficLogger* trafficLogger,
     _qa_endtime = 0;
     _fi_count = 0;
 
+    // Initialize REDR EV buffer
+    _EVbuffer.resize(REPS_BUFFER_SIZE);
+    _ev_head = 0;
+    _validEVs = 0;
+    _exploreCounter = 0;
+
     if (_sender_based_cc) {
         switch (_sender_cc_algo) {
             case DCTCP:
@@ -952,6 +958,30 @@ void UecSrc::processAck(const UecAckPacket& pkt) {
         cout << "processAck " << cum_ack << " ref_epsn " << pkt.acked_psn() << " recvd_bytes " << _recvd_bytes << " newly_recvd_bytes " << newly_recvd_bytes << endl;
     }
     _stats.acks_received++;
+
+    // REDR Algorithm 1: Logic at host when ACK received
+    // If ECN is set, return early (skip EV buffer update)
+    if (!pkt.ecn_echo()) {
+        // Store cached EV in buffer
+        _EVbuffer[_ev_head].cachedEV = pkt.ev();
+        
+        // If deflected, mark as frozen
+        if (pkt.deflected()) {
+            _EVbuffer[_ev_head].isFrozen = true;
+            _EVbuffer[_ev_head].unfreeze = eventlist().now() + TIMEOUT;
+            _ev_head = (_ev_head + 1) % REPS_BUFFER_SIZE;
+            // Note: We return here but continue processing for other ACK logic
+        } else {
+            // If not valid before, increment validEVs
+            if (!_EVbuffer[_ev_head].isValid) {
+                _validEVs++;
+            }
+            
+            _EVbuffer[_ev_head].isValid = true;
+            _EVbuffer[_ev_head].isFrozen = false;
+            _ev_head = (_ev_head + 1) % REPS_BUFFER_SIZE;
+        }
+    }
 
     //decrease flightsize.
     _in_flight -= newly_recvd_bytes;
@@ -2094,6 +2124,33 @@ void UecSrc::cancelRTO() {
     }
 }
 
+UecSrc::EVBufferEntry* UecSrc::getNextEV() {
+    if (_validEVs == 0) {
+        // No valid EVs, return a default entry
+        static EVBufferEntry default_entry;
+        return &default_entry;
+    }
+    
+    // Calculate offset: (head - validEVs) mod BUFFER_SIZE
+    uint16_t offset = (_ev_head + REPS_BUFFER_SIZE - _validEVs) % REPS_BUFFER_SIZE;
+    
+    // Mark as invalid and decrement validEVs
+    _EVbuffer[offset].isValid = false;
+    _validEVs--;
+    
+    // Check if frozen and not yet unfrozen
+    if (_EVbuffer[offset].isFrozen) {
+        if (_EVbuffer[offset].unfreeze > eventlist().now()) {
+            // Still frozen, recursively get next EV
+            return getNextEV();
+        }
+        // Unfrozen, mark for cloning
+        _EVbuffer[offset].clonePacket = true;
+    }
+    
+    return &_EVbuffer[offset];
+}
+
 mem_b UecSrc::sendNewPacket(const Route& route) {
     if (_debug_src)
         cout << timeAsUs(eventlist().now()) << " " << _flow.str() << " " << _nodename
@@ -2134,7 +2191,32 @@ mem_b UecSrc::sendNewPacket(const Route& route) {
     auto* p = UecDataPacket::newpkt(_flow, route, _highest_sent, full_pkt_size, ptype,
                                      _pull_target, _dstaddr);
 
-    uint16_t ev = _mp->nextEntropy(_highest_sent, (uint64_t)_cwnd/_mss);
+    // REDR Algorithm 2: Logic on send datapath
+    uint16_t ev;
+    if (_EVbuffer.empty() || _validEVs == 0 || _exploreCounter > 0) {
+        // Use random EV
+        ev = random() % EVS_SIZE;
+    } else {
+        EVBufferEntry* evData = getNextEV();
+        ev = evData->cachedEV;
+        
+        // If clonePacket is set, clone the packet and send it
+        if (evData->clonePacket) {
+            // Create cloned packet with same data
+            auto* clonedPkt = UecDataPacket::newpkt(_flow, route, _highest_sent, full_pkt_size, ptype,
+                                                     _pull_target, _dstaddr);
+            clonedPkt->set_pathid(ev);
+            clonedPkt->flow().logTraffic(*clonedPkt, *this, TrafficLogger::PKT_CREATESEND);
+            clonedPkt->set_ar(p->ar());
+            clonedPkt->sendOn();
+            _highest_sent++;
+            _stats.new_pkts_sent++;
+            
+            // Reset clonePacket flag
+            evData->clonePacket = false;
+        }
+    }
+    
     p->set_pathid(ev);
     p->flow().logTraffic(*p, *this, TrafficLogger::PKT_CREATESEND);
 
@@ -2638,7 +2720,7 @@ void UecSink::processData(UecDataPacket& pkt) {
     
     if (pkt.packet_type() == UecBasePacket::DATA_PROBE){
         UecAckPacket* ack_packet =
-            sack(pkt.path_id(), sackBitmapBase(pkt.epsn()), pkt.epsn(), (bool)(pkt.flags() & ECN_CE), pkt.retransmitted());
+            sack(pkt.path_id(), sackBitmapBase(pkt.epsn()), pkt.epsn(), (bool)(pkt.flags() & ECN_CE), pkt.retransmitted(), pkt.deflected());
         ack_packet->set_probe_ack(true);
         ack_packet->set_deflected(pkt.deflected());
         if (pkt.deflected()) {
@@ -2911,7 +2993,7 @@ void UecSink::processRts(const UecRtsPacket& pkt) {
         // sender is confused and sending us duplicates: ACK straight away.
         // this code is different from the proposed hardware implementation, as it keeps track of
         // the ACK state of OOO packets.
-        UecAckPacket* ack_packet = sack(pkt.path_id(), sackBitmapBase(pkt.epsn()), pkt.epsn(), ecn, pkt.retransmitted());
+        UecAckPacket* ack_packet = sack(pkt.path_id(), sackBitmapBase(pkt.epsn()), pkt.epsn(), ecn, pkt.retransmitted(), pkt.deflected());
         ack_packet->set_is_rts(true);
         ack_packet->set_deflected(pkt.deflected());
         _nic.sendControlPacket(ack_packet, NULL, this);
@@ -3082,7 +3164,7 @@ uint64_t UecSink::buildSackBitmap(UecBasePacket::seq_t ref_epsn) {
     return bitmap;
 }
 
-UecAckPacket* UecSink::sack(uint16_t path_id, UecBasePacket::seq_t seqno, UecBasePacket::seq_t acked_psn, bool ce, bool rtx_echo) {
+UecAckPacket* UecSink::sack(uint16_t path_id, UecBasePacket::seq_t seqno, UecBasePacket::seq_t acked_psn, bool ce, bool rtx_echo, bool deflected) {
     uint64_t bitmap = buildSackBitmap(seqno);
     UecAckPacket* pkt =
         UecAckPacket::newpkt(_flow, NULL, _expected_epsn, seqno, acked_psn, path_id, ce, _recvd_bytes,_rcv_cwnd_pen,_srcaddr);
@@ -3090,6 +3172,7 @@ UecAckPacket* UecSink::sack(uint16_t path_id, UecBasePacket::seq_t seqno, UecBas
     pkt->set_ooo(_out_of_order_count);
     pkt->set_rtx_echo(rtx_echo);
     pkt->set_probe_ack(false);
+    pkt->set_deflected(deflected);
     return pkt;
 }
 
