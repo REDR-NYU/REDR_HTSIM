@@ -1143,6 +1143,11 @@ int main(int argc, char **argv) {
     if (load_balancing_algo == REDR) {
         cout << "[REDR] Failed link encounters: " << FatTreeSwitch::get_redr_failed_link_count() << endl;
     }
+    
+    // Print REPS statistics if using REPS algorithm
+    if (load_balancing_algo == REPS || load_balancing_algo == REPS_LEGACY) {
+        cout << "[REPS] Packets dropped due to link failures: " << FatTreeSwitch::get_reps_dropped_packet_count() << endl;
+    }
     /*
     list <const Route*>::iterator rt_i;
     int counts[10]; int hop;

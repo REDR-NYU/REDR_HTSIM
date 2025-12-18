@@ -49,7 +49,8 @@ void FatTreeSwitch::receivePacket(Packet& pkt){
 
         Route * nh = getNextHop(pkt,NULL);
         if (!nh) {
-            // No route available - drop packet
+            // No route available - drop packet (link failure)
+            _reps_dropped_packet_count++;
             _packets.erase(&pkt);
             pkt.free();
             return;
@@ -325,6 +326,7 @@ void FatTreeSwitch::permute_paths(vector<FibEntry *>* uproutes) {
 FatTreeSwitch::routing_strategy FatTreeSwitch::_strategy = FatTreeSwitch::NIX;
 uint16_t FatTreeSwitch::_ar_fraction = 0;
 uint64_t FatTreeSwitch::_redr_failed_link_count = 0;
+uint64_t FatTreeSwitch::_reps_dropped_packet_count = 0;
 uint16_t FatTreeSwitch::_ar_sticky = FatTreeSwitch::PER_PACKET;
 simtime_picosec FatTreeSwitch::_sticky_delta = timeFromUs((uint32_t)10);
 double FatTreeSwitch::_ecn_threshold_fraction = 0.2;

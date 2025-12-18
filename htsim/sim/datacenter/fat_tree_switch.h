@@ -125,6 +125,8 @@ public:
     static void set_ar_fraction(uint16_t f) { assert(f>=1);_ar_fraction = f;} 
     static uint64_t get_redr_failed_link_count() { return _redr_failed_link_count; }
     static void reset_redr_failed_link_count() { _redr_failed_link_count = 0; }
+    static uint64_t get_reps_dropped_packet_count() { return _reps_dropped_packet_count; }
+    static void reset_reps_dropped_packet_count() { _reps_dropped_packet_count = 0; }
 
     static routing_strategy _strategy;
     static uint16_t _ar_fraction;
@@ -135,6 +137,7 @@ public:
     static uint16_t _trim_size;
     static bool _disable_trim;
     static uint64_t _redr_failed_link_count;
+    static uint64_t _reps_dropped_packet_count;
 private:
     switch_type _type;
     Pipe* _pipe;
