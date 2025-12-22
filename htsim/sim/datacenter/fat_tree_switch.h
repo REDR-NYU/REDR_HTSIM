@@ -121,13 +121,6 @@ public:
 
     virtual void permute_paths(vector<FibEntry*>* uproutes);
 
-    // REDR helper functions
-    uint32_t computePrimaryHash(Packet& pkt, vector<FibEntry*>* available_hops);
-    uint32_t computeBackupHash(Packet& pkt, vector<FibEntry*>* available_hops);
-    bool portDown(uint32_t port_index, vector<FibEntry*>* available_hops);
-    bool portUp(uint32_t port_index, vector<FibEntry*>* available_hops);
-    bool loopDetected(Packet& pkt);
-
     static void set_strategy(routing_strategy s) { assert (_strategy==NIX); _strategy = s; }
     static void set_ar_fraction(uint16_t f) { assert(f>=1);_ar_fraction = f;} 
     static uint64_t get_redr_failed_link_count() { return _redr_failed_link_count; }

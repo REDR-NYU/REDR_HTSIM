@@ -335,93 +335,12 @@ int8_t (*FatTreeSwitch::fn)(FibEntry*,FibEntry*)= &FatTreeSwitch::compare_queues
 uint16_t FatTreeSwitch::_trim_size = 64;
 bool FatTreeSwitch::_disable_trim = false;
 
-// REDR Algorithm 3: Helper functions
-uint32_t FatTreeSwitch::computePrimaryHash(Packet& pkt, vector<FibEntry*>* available_hops) {
-    return freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt) % available_hops->size();
-}
-
-uint32_t FatTreeSwitch::computeBackupHash(Packet& pkt, vector<FibEntry*>* available_hops) {
-    // Use a different hash function for backup (XOR with a different salt)
-    return freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt ^ 0x12345678) % available_hops->size();
-}
-
-bool FatTreeSwitch::portDown(uint32_t port_index, vector<FibEntry*>* available_hops) {
-    if (port_index >= available_hops->size()) return true;
-    
-    FibEntry* e = (*available_hops)[port_index];
-    Route* r = e->getEgressPort();
-    if (!r || r->size() == 0) return true;
-    
-    BaseQueue* q = dynamic_cast<BaseQueue*>(r->at(0));
-    if (!q) return false;  // Not a queue, assume it's up
-    
-    // Check if queue is full (simple heuristic - can be enhanced)
-    // For now, consider port down if queue is > 90% full
-    if (q->queuesize() > q->maxsize() * 0.9) {
-        return true;
-    }
-    
-    return false;
-}
-
-bool FatTreeSwitch::portUp(uint32_t port_index, vector<FibEntry*>* available_hops) {
-    return !portDown(port_index, available_hops);
-}
-
-bool FatTreeSwitch::loopDetected(Packet& pkt) {
-    // Simple loop detection: if packet direction changed from UP to DOWN, it's a loop
-    // More sophisticated: track visited switches in packet header
-    // For now, use direction change as a simple heuristic
-    packet_direction current_dir = pkt.get_direction();
-    
-    // If we're trying to go UP after going DOWN, it's likely a loop
-    // This is a simplified check - in practice, you'd track visited switches
-    return false;  // Simplified - can be enhanced with visited switch tracking
-}
-
 Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
     vector<FibEntry*> * available_hops = _fib->getRoutes(pkt.dst());
 
     if (available_hops){
-        // REDR Algorithm 3: Logic at switch upon packet arrival
-        // Only apply REDR to UEC data packets
-        if (pkt.type() == UECDATA) {
-            uint32_t primary = computePrimaryHash(pkt, available_hops);
-            
-            if (portDown(primary, available_hops)) {
-                // Primary port is down, try backup
-                uint32_t backup = computeBackupHash(pkt, available_hops);
-                
-                if (primary == backup || loopDetected(pkt)) {
-                    // Can't use backup (same as primary or loop detected), push back
-                    // For now, we'll just use primary anyway (push back not implemented)
-                    // In a real implementation, you'd queue the packet for later
-                } else if (portUp(backup, available_hops)) {
-                    // Use backup port - mark as deflected
-                    FibEntry* e = (*available_hops)[backup];
-                    pkt.set_direction(e->getDirection());
-                    // Mark UEC data packet as deflected
-                    UecDataPacket* uec_pkt = dynamic_cast<UecDataPacket*>(&pkt);
-                    if (uec_pkt) {
-                        uec_pkt->set_deflected(true);
-                    }
-                    return e->getEgressPort();
-                } else {
-                    // Backup also down, push back (use primary for now)
-                }
-            } else {
-                // Primary port is up, use it
-                FibEntry* e = (*available_hops)[primary];
-                pkt.set_direction(e->getDirection());
-                return e->getEgressPort();
-            }
-        }
-        
-        // Fall through to original routing logic for non-UEC packets or if REDR didn't handle it
-        
-        // Fall through to original logic if REDR didn't handle it
         //implement a form of ECMP hashing; might need to revisit based on measured performance.
-        uint32_t ecmp_choice = primary;  // Use primary as default
+        uint32_t ecmp_choice = 0;
         if (available_hops->size()>1)
             switch(_strategy){
             case NIX:

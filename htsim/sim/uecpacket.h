@@ -63,7 +63,6 @@ public:
         
         p->_ar = false;
         p->set_dst(destination);
-        p->_deflected = false;
 
         p->_direction = NONE;
         p->_path_len = route.size();
@@ -111,8 +110,6 @@ public:
     inline bool syn() const {return _syn;}
     inline bool fin() const {return _fin;}
     inline PacketType packet_type() const {return _packet_type;}
-    inline void set_deflected(bool deflected) {_deflected = deflected;}
-    inline bool deflected() const {return _deflected;}
 
     inline int32_t trim_hop() const {return _trim_hop.value_or(INT32_MAX);}
     inline packet_direction trim_direction() const {return _trim_direction;}
@@ -254,8 +251,6 @@ public:
     inline bool is_probe_ack() const {return _is_probe_ack;}
     inline void set_rtx_echo(bool rtx_bit){_rtx_echo = rtx_bit;};
     inline bool rtx_echo() const {return _rtx_echo;}
-    inline void set_deflected(bool deflected){_deflected = deflected;}
-    inline bool deflected() const {return _deflected;}
 
     virtual ~UecAckPacket(){}
 
@@ -277,7 +272,6 @@ protected:
     bool _deflected;  // Flag indicating packet was deflected at switch
     bool _rtx_echo;
     bool _is_rts = false;
-    bool _deflected = false;  // REDR: indicates if packet was deflected at switch
     simtime_picosec _residency_time;
     uint32_t _out_of_order_count;
     bool _is_probe_ack;
